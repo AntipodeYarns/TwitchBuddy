@@ -3,3 +3,5 @@ mypy
 black
 pytest
 pre-commit
+pytest-asyncio
+types-requests

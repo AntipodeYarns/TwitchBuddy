@@ -1,0 +1,56 @@
+<!doctype html>
+<html>
+  <head>
+    <meta charset="utf-8" />
+    <title>TwitchBuddy Alerts</title>
+    <style>
+      body { background: transparent; margin: 0; overflow: hidden; }
+      #alert { position: absolute; left: 50%; top: 50%; transform: translate(-50%, -50%); display: none; }
+      #alert img { max-width: 80vw; max-height: 80vh; }
+      #alert .text { color: white; font-size: 36px; text-shadow: 0 0 8px black; }
+    </style>
+  </head>
+  <body>
+    <div id="alert">
+      <img id="visual" src="" alt="alert visual" />
+      <div class="text" id="text"></div>
+    </div>
+    <audio id="audio"></audio>
+    <script>
+      // Choose secure or insecure WS based on page protocol to avoid mixed-content errors
+      const wsProto = location.protocol === 'https:' ? 'wss:' : 'ws:';
+      const ws = new WebSocket(wsProto + '//' + location.host + '/ws/alerts');
+      ws.onerror = (e) => { console.error('WebSocket error', e); };
+      ws.onopen = () => { console.debug('WebSocket connected'); };
+      const alertEl = document.getElementById('alert');
+      const visual = document.getElementById('visual');
+      const text = document.getElementById('text');
+      const audio = document.getElementById('audio');
+
+      ws.onmessage = (ev) => {
+        let payload;
+        try {
+          payload = JSON.parse(ev.data);
+        } catch (err) {
+          console.error('Invalid alert payload', ev.data, err);
+          return;
+        }
+        if (payload.visual) visual.src = payload.visual;
+        text.textContent = payload.text || '';
+  if (payload.audio) { audio.src = payload.audio; audio.play().catch((e) => { console.warn('audio play failed', e); }); }
+        alertEl.style.opacity = 0;
+        alertEl.style.display = 'block';
+        // fade in
+        let op = 0;
+        const fadeIn = setInterval(() => { op += 0.05; alertEl.style.opacity = op; if (op >= 1) clearInterval(fadeIn); }, 30);
+        // hide after duration
+        const duration = payload.duration || 3000;
+        setTimeout(() => {
+          // fade out
+          let op2 = 1;
+          const fadeOut = setInterval(() => { op2 -= 0.05; alertEl.style.opacity = op2; if (op2 <= 0) { clearInterval(fadeOut); alertEl.style.display = 'none'; } }, 30);
+        }, duration);
+      };
+    </script>
+  </body>
+  </html>

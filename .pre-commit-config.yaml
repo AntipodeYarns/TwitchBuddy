@@ -15,7 +15,10 @@ repos:
     rev: v1.17.1
     hooks:
       - id: mypy
-        args: ["src", "tests"]
+        name: mypy-local
+        entry: mypy --config-file=pyproject.toml --exclude '(^|/)(\\.venv|\\.mypy_cache|.*\\.egg-info)(/|$)'
+        language: system
+        types: [python]
 
   - repo: https://github.com/pre-commit/pre-commit-hooks
     rev: v4.6.0

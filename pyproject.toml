@@ -23,6 +23,8 @@ python_version = "3.12"
 ignore_missing_imports = true
 warn_return_any = false
 warn_unused_configs = true
+files = ["src", "tests"]
+exclude = "(^|/)(\\.venv|\\.mypy_cache|.*\\.egg-info)(/|$)"
 
 [tool.black]
 line-length = 88

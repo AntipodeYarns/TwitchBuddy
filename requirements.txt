@@ -1,1 +1,9 @@
 # pin project runtime/dev deps here
+fastapi
+uvicorn[standard]
+
+# Twitch integration
+twitchio
+twitchAPI
+httpx
+cryptography
