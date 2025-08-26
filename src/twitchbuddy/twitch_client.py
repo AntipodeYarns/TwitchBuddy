@@ -3,6 +3,8 @@ import re
 import time
 import asyncio
 
+from .trigger_store import TriggerStore
+
 
 class Trigger:
     def __init__(
@@ -10,22 +12,24 @@ class Trigger:
         pattern: str,
         response: Optional[str] = None,
         alert: Optional[dict] = None,
-        cooldown_ms: int = 0,
+        cooldown_minutes: int = 0,
     ):
         self.pattern: Pattern[str] = re.compile(pattern)
         self.response = response
         self.alert = alert
-        self.cooldown_ms = cooldown_ms
+        # cooldown expressed in minutes
+        self.cooldown_minutes = cooldown_minutes
         self._last_fired = 0.0
 
     def matches(self, text: str) -> Optional[re.Match]:
         return self.pattern.search(text)
 
     def can_fire(self) -> bool:
-        return (time.time() * 1000) - self._last_fired >= self.cooldown_ms
+        # _last_fired stored in seconds since epoch; compare elapsed seconds
+        return (time.time() - self._last_fired) >= (self.cooldown_minutes * 60)
 
     def mark_fired(self) -> None:
-        self._last_fired = time.time() * 1000
+        self._last_fired = time.time()
 
 
 class ChatClient:
@@ -51,14 +55,95 @@ class ChatClient:
         # create scheduler which will call self._send_message_async
         self.scheduler = Scheduler(send_callable=self._send_message_async)
 
+        # persistent trigger storage
+        self.trigger_store = TriggerStore()
+        # load persisted triggers
+        for st in self.trigger_store.list_triggers():
+            # map stored trigger to in-memory Trigger
+            if st.response_type_id == 1:
+                # chat_message
+                self.triggers.append(
+                    Trigger(
+                        st.regex_pattern,
+                        response=st.response_text,
+                        alert=None,
+                        cooldown_minutes=st.cooldown_minutes,
+                    )
+                )
+            elif st.response_type_id == 2:
+                # alert: store arg_mappings into alert payload for downstream consumers
+                alert_payload = {"args": st.arg_mappings} if st.arg_mappings else {}
+                self.triggers.append(
+                    Trigger(
+                        st.regex_pattern,
+                        response=None,
+                        alert=alert_payload,
+                        cooldown_minutes=st.cooldown_minutes,
+                    )
+                )
+
     def add_trigger(
         self,
         pattern: str,
         response: Optional[str] = None,
         alert: Optional[dict] = None,
-        cooldown_ms: int = 0,
-    ) -> None:
-        self.triggers.append(Trigger(pattern, response, alert, cooldown_ms))
+        cooldown_minutes: int = 0,
+        response_type_id: int | None = None,
+        arg_mappings: Optional[Dict[str, Any]] = None,
+    ) -> str:
+        # determine response_type_id if not provided
+        if response_type_id is None:
+            response_type_id = 2 if alert is not None else 1
+
+        # persist to store and add to in-memory list
+        tid = self.trigger_store.add_trigger(
+            regex_pattern=pattern,
+            response_type_id=response_type_id,
+            response_text=response,
+            arg_mappings=arg_mappings,
+            cooldown_minutes=cooldown_minutes,
+        )
+
+        if response_type_id == 1:
+            self.triggers.append(Trigger(pattern, response, None, cooldown_minutes))
+        else:
+            self.triggers.append(
+                Trigger(
+                    pattern,
+                    None,
+                    alert or ({"args": arg_mappings} if arg_mappings else {}),
+                    cooldown_minutes,
+                )
+            )
+        return tid
+
+    def remove_trigger(self, trigger_id: str) -> bool:
+        # remove from DB and in-memory
+        ok = self.trigger_store.remove_trigger(trigger_id)
+        if ok:
+            # reload in-memory triggers from store to keep in sync
+            self.triggers.clear()
+            for st in self.trigger_store.list_triggers():
+                if st.response_type_id == 1:
+                    self.triggers.append(
+                        Trigger(
+                            st.regex_pattern,
+                            response=st.response_text,
+                            alert=None,
+                            cooldown_minutes=st.cooldown_minutes,
+                        )
+                    )
+                elif st.response_type_id == 2:
+                    alert_payload = {"args": st.arg_mappings} if st.arg_mappings else {}
+                    self.triggers.append(
+                        Trigger(
+                            st.regex_pattern,
+                            response=None,
+                            alert=alert_payload,
+                            cooldown_minutes=st.cooldown_minutes,
+                        )
+                    )
+        return ok
 
     async def _handle_message(
         self, author: str, content: str, reply_callable: Callable[[str], asyncio.Future]
@@ -114,10 +199,10 @@ class ChatClient:
 
     # Schedule management wrappers
     def add_schedule(
-        self, message: str, interval_seconds: int, enabled: bool = True
+        self, message: str, interval_minutes: int, enabled: bool = True
     ) -> str:
         return self.scheduler.add(
-            message=message, interval_seconds=interval_seconds, enabled=enabled
+            message=message, interval_minutes=interval_minutes, enabled=enabled
         )
 
     def remove_schedule(self, schedule_id: str) -> bool:

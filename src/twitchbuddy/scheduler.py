@@ -12,7 +12,7 @@ from typing import Callable, Awaitable, Dict, Any, Optional
 class Schedule:
     id: str
     message: str
-    interval_seconds: int
+    interval_minutes: int
     enabled: bool = True
 
 
@@ -45,16 +45,38 @@ class Scheduler:
     def _ensure_db(self) -> None:
         conn = self._get_conn()
         try:
+            # Create table if missing with interval_minutes column
             conn.execute(
                 """
                 CREATE TABLE IF NOT EXISTS schedules (
                     id TEXT PRIMARY KEY,
                     message TEXT NOT NULL,
-                    interval_seconds INTEGER NOT NULL,
+                    interval_minutes INTEGER NOT NULL,
                     enabled INTEGER NOT NULL
                 )
                 """
             )
+
+            # Migration: if an existing table uses interval_seconds, migrate values to minutes
+            cur = conn.execute("PRAGMA table_info(schedules)")
+            cols = [row[1] for row in cur.fetchall()]
+            if "interval_seconds" in cols and "interval_minutes" not in cols:
+                conn.execute("ALTER TABLE schedules RENAME TO schedules_old")
+                conn.execute(
+                    """
+                    CREATE TABLE schedules (
+                        id TEXT PRIMARY KEY,
+                        message TEXT NOT NULL,
+                        interval_minutes INTEGER NOT NULL,
+                        enabled INTEGER NOT NULL
+                    )
+                    """
+                )
+                # convert seconds -> minutes (round up)
+                conn.execute(
+                    "INSERT INTO schedules (id, message, interval_minutes, enabled) SELECT id, message, CAST((interval_seconds + 59) / 60 AS INTEGER), enabled FROM schedules_old"
+                )
+                conn.execute("DROP TABLE schedules_old")
             conn.commit()
         finally:
             conn.close()
@@ -63,7 +85,7 @@ class Scheduler:
         conn = self._get_conn()
         try:
             cur = conn.execute(
-                "SELECT id, message, interval_seconds, enabled FROM schedules"
+                "SELECT id, message, interval_minutes, enabled FROM schedules"
             )
             rows = cur.fetchall()
             self._schedules = {}
@@ -71,7 +93,7 @@ class Scheduler:
                 s = Schedule(
                     id=r["id"],
                     message=r["message"],
-                    interval_seconds=int(r["interval_seconds"]),
+                    interval_minutes=int(r["interval_minutes"]),
                     enabled=bool(r["enabled"]),
                 )
                 self._schedules[s.id] = s
@@ -83,20 +105,20 @@ class Scheduler:
         self.load()
         return {sid: asdict(s) for sid, s in self._schedules.items()}
 
-    def add(self, message: str, interval_seconds: int, enabled: bool = True) -> str:
+    def add(self, message: str, interval_minutes: int, enabled: bool = True) -> str:
         sid = str(uuid.uuid4())
         conn = self._get_conn()
         try:
             conn.execute(
-                "INSERT INTO schedules (id, message, interval_seconds, enabled) VALUES (?, ?, ?, ?)",
-                (sid, message, int(interval_seconds), int(bool(enabled))),
+                "INSERT INTO schedules (id, message, interval_minutes, enabled) VALUES (?, ?, ?, ?)",
+                (sid, message, int(interval_minutes), int(bool(enabled))),
             )
             conn.commit()
         finally:
             conn.close()
         # update in-memory and return id
         s = Schedule(
-            id=sid, message=message, interval_seconds=interval_seconds, enabled=enabled
+            id=sid, message=message, interval_minutes=interval_minutes, enabled=enabled
         )
         self._schedules[sid] = s
         return sid
@@ -120,7 +142,7 @@ class Scheduler:
     async def _run_schedule(self, s: Schedule) -> None:
         try:
             while s.enabled:
-                await asyncio.sleep(s.interval_seconds)
+                await asyncio.sleep(s.interval_minutes * 60)
                 try:
                     await self._send(s.message)
                 except Exception:
