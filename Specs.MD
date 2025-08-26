@@ -45,3 +45,22 @@ The alerts FastAPI application exposes a small set of admin endpoints to manage 
 - DELETE /admin/triggers/{trigger_id} — remove a trigger by id.
 
 These endpoints are intentionally minimal and intended for operator use behind appropriate authentication in production.
+
+For later (performance, safety, and ops)
+--------------------------------------
+
+The following are recommended improvements to address performance, correctness, and production readiness. They are intentionally deferred and listed here for planning:
+
+- Make trigger firing atomic: add a small lock (e.g., threading.Lock) to `Trigger` so `can_fire()` and `mark_fired()` are safe when matching is offloaded to threads.
+- Improve matching performance for large trigger sets:
+    - Shard triggers by prefix or first-char to reduce candidate sets.
+    - For plain substring matches, consider Aho-Corasick or a trie implementation.
+    - Benchmark with realistic message rates and trigger counts to choose the right approach.
+- Protect admin endpoints with authentication (API key or OAuth) before exposing in production.
+- Use Pydantic request/response models for admin endpoints to improve validation and OpenAPI docs.
+- Add CI (GitHub Actions) to run black/ruff/mypy/pytest on PRs and main branch.
+- Database hardening and concurrency:
+    - Use SQLite WAL mode and short-lived connections, or move to server DB (Postgres) for multi-process concurrency.
+    - Add simple retry/backoff for transient SQLITE_BUSY.
+- Add migrations/versioning for DB schema (Alembic or simple migration tool).
+- Consider separating runtime DB files from repository (add to .gitignore). Use seeded fixtures for tests.
