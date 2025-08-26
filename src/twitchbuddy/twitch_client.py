@@ -13,13 +13,16 @@ class Trigger:
         response: Optional[str] = None,
         alert: Optional[dict] = None,
         cooldown_minutes: int = 0,
+        trigger_id: Optional[str] = None,
+        last_fired: float = 0.0,
     ):
         self.pattern: Pattern[str] = re.compile(pattern)
         self.response = response
         self.alert = alert
         # cooldown expressed in minutes
         self.cooldown_minutes = cooldown_minutes
-        self._last_fired = 0.0
+        self._last_fired = float(last_fired or 0.0)
+        self.id = trigger_id
 
     def matches(self, text: str) -> Optional[re.Match]:
         return self.pattern.search(text)
@@ -68,6 +71,8 @@ class ChatClient:
                         response=st.response_text,
                         alert=None,
                         cooldown_minutes=st.cooldown_minutes,
+                        trigger_id=st.id,
+                        last_fired=getattr(st, "last_fired", 0.0),
                     )
                 )
             elif st.response_type_id == 2:
@@ -79,6 +84,8 @@ class ChatClient:
                         response=None,
                         alert=alert_payload,
                         cooldown_minutes=st.cooldown_minutes,
+                        trigger_id=st.id,
+                        last_fired=getattr(st, "last_fired", 0.0),
                     )
                 )
 
@@ -105,7 +112,9 @@ class ChatClient:
         )
 
         if response_type_id == 1:
-            self.triggers.append(Trigger(pattern, response, None, cooldown_minutes))
+            self.triggers.append(
+                Trigger(pattern, response, None, cooldown_minutes, trigger_id=tid)
+            )
         else:
             self.triggers.append(
                 Trigger(
@@ -113,6 +122,7 @@ class ChatClient:
                     None,
                     alert or ({"args": arg_mappings} if arg_mappings else {}),
                     cooldown_minutes,
+                    trigger_id=tid,
                 )
             )
         return tid
@@ -148,25 +158,47 @@ class ChatClient:
     async def _handle_message(
         self, author: str, content: str, reply_callable: Callable[[str], asyncio.Future]
     ) -> None:
-        for trig in self.triggers:
-            if trig.matches(content) and trig.can_fire():
-                trig.mark_fired()
-                # send chat response if present
-                if trig.response:
-                    try:
-                        await reply_callable(trig.response)
-                    except Exception:
-                        # ignore send failures
-                        pass
-                # send alert payload if present
-                if trig.alert and self.on_alert:
-                    try:
-                        # allow sync callback
-                        maybe = self.on_alert(trig.alert)
-                        if asyncio.iscoroutine(maybe):
-                            await maybe
-                    except Exception:
-                        pass
+        # Offload the potentially CPU-bound regex scanning to a thread so we don't
+        # block the asyncio event loop when chat moves quickly or there are many
+        # configured triggers. Matching is done against precompiled patterns.
+        def _find_matching_triggers(content: str):
+            out: list[Trigger] = []
+            for trig in self.triggers:
+                try:
+                    if trig.matches(content) and trig.can_fire():
+                        out.append(trig)
+                except Exception:
+                    # ignore matching errors per-trigger
+                    continue
+            return out
+
+        matches = await asyncio.to_thread(_find_matching_triggers, content)
+
+        for trig in matches:
+            trig.mark_fired()
+            # persist last-fired timestamp if this trigger is persisted
+            try:
+                if getattr(trig, "id", None):
+                    self.trigger_store.update_last_fired(trig.id, trig._last_fired)
+            except Exception:
+                # best-effort persistence; ignore failures
+                pass
+            # send chat response if present
+            if trig.response:
+                try:
+                    await reply_callable(trig.response)
+                except Exception:
+                    # ignore send failures
+                    pass
+            # send alert payload if present
+            if trig.alert and self.on_alert:
+                try:
+                    # allow sync callback
+                    maybe = self.on_alert(trig.alert)
+                    if asyncio.iscoroutine(maybe):
+                        await maybe
+                except Exception:
+                    pass
 
     async def _send_message_async(self, message: str) -> None:
         """Async send helper used by the scheduler. Sends to chat if bot is available."""

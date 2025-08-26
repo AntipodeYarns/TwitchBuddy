@@ -1,11 +1,11 @@
 from __future__ import annotations
-
+import uuid
 import asyncio
 import sqlite3
-import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
 from typing import Callable, Awaitable, Dict, Any, Optional
+from .paths import default_db_path
 
 
 @dataclass
@@ -20,7 +20,7 @@ class Scheduler:
     """Simple interval-based scheduler with SQLite persistence.
 
     Schedules are stored in a local SQLite database at `db_path` (default
-    'schedules.db'). The scheduler will call the provided async `send_callable`
+    'TwitchBuddy.db'). The scheduler will call the provided async `send_callable`
     with the message string on each interval. Database operations are simple
     and lightweight; we create a connection per operation.
     """
@@ -31,7 +31,10 @@ class Scheduler:
         db_path: Optional[Path] = None,
     ) -> None:
         self._send = send_callable
-        self._db_path = db_path or Path.cwd() / "schedules.db"
+        # consolidate scheduler storage into the main DB by default
+        self._db_path = (
+            Path(db_path) if db_path is not None else default_db_path("TwitchBuddy.db")
+        )
         self._schedules: Dict[str, Schedule] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
         self._ensure_db()

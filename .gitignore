@@ -6,4 +6,4 @@ build/
 *.egg-info/
 cert.pem
 key.pem
-triggers.db
+# Single consolidated DB file is kept in the repo as a template; do not ignore.

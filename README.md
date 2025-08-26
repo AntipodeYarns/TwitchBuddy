@@ -79,3 +79,30 @@ Notes
 -----
 - The repo uses a `src/` layout. Mypy/ruff/black configs live in `pyproject.toml`.
 - CI is configured in `.github/workflows/ci.yml` and runs on push/PR.
+
+Data files & overrides
+----------------------
+
+By default the application stores its SQLite database `TwitchBuddy.db` in a
+platform-appropriate per-user data directory. You can override these locations
+with environment variables if you need to control where files are written.
+
+Defaults:
+- Windows: %LOCALAPPDATA%\TwitchBuddy\TwitchBuddy.db (falls back to %APPDATA% or %PROGRAMDATA%)
+- macOS: ~/Library/Application Support/TwitchBuddy/TwitchBuddy.db
+- Linux: $XDG_DATA_HOME/TwitchBuddy/TwitchBuddy.db or ~/.local/share/TwitchBuddy/TwitchBuddy.db
+
+Environment overrides:
+- `TWITCHBUDDY_DATA_DIR` — set the directory where the app data will be stored.
+- `TWITCHBUDDY_DB_PATH` — set the full path to the DB file (overrides `TWITCHBUDDY_DATA_DIR`).
+
+Example (Windows PowerShell):
+
+```powershell
+$env:TWITCHBUDDY_DATA_DIR = "C:\\ProgramData\\TwitchBuddy"
+# or set a full path
+$env:TWITCHBUDDY_DB_PATH = "C:\\ProgramData\\TwitchBuddy\\TwitchBuddy.db"
+```
+
+The stores accept an explicit `db_path` parameter too, so you can also pass
+temporary files during tests or point to a custom path in production code.

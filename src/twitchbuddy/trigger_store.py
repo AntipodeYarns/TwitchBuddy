@@ -5,6 +5,7 @@ import sqlite3
 import uuid
 from dataclasses import dataclass
 from pathlib import Path
+from .paths import default_db_path
 from typing import Dict, Any, List, Optional
 
 
@@ -16,6 +17,7 @@ class StoredTrigger:
     response_text: Optional[str]
     arg_mappings: Optional[Dict[str, Any]]
     cooldown_minutes: int = 0
+    last_fired: float = 0.0
 
 
 class TriggerStore:
@@ -30,7 +32,15 @@ class TriggerStore:
     """
 
     def __init__(self, db_path: Optional[Path] = None) -> None:
-        self._db_path = db_path or Path.cwd() / "triggers.db"
+        """Initialize the TriggerStore.
+
+        Uses an OS-appropriate default data directory when no explicit
+        db_path is provided.
+        """
+        # default to a single consolidated DB file inside the OS-appropriate data dir
+        self._db_path = (
+            Path(db_path) if db_path is not None else default_db_path("TwitchBuddy.db")
+        )
         self._ensure_db()
 
     def _get_conn(self) -> sqlite3.Connection:
@@ -58,6 +68,7 @@ class TriggerStore:
                     response_text TEXT,
                     arg_mappings TEXT,
                     cooldown_minutes INTEGER DEFAULT 0,
+                    last_fired REAL DEFAULT 0,
                     FOREIGN KEY(response_type_id) REFERENCES response_type(id)
                 )
                 """
@@ -74,6 +85,24 @@ class TriggerStore:
         finally:
             conn.close()
 
+        # If an existing DB was created without last_fired, add the column.
+        # ALTER TABLE ADD COLUMN is safe if column is missing; ignore otherwise.
+        conn2 = self._get_conn()
+        try:
+            cur = conn2.execute("PRAGMA table_info(triggers)")
+            cols = [r[1] for r in cur.fetchall()]
+            if "last_fired" not in cols:
+                try:
+                    conn2.execute(
+                        "ALTER TABLE triggers ADD COLUMN last_fired REAL DEFAULT 0"
+                    )
+                    conn2.commit()
+                except Exception:
+                    # best-effort migration; if it fails, continue without raising
+                    pass
+        finally:
+            conn2.close()
+
     def add_trigger(
         self,
         regex_pattern: str,
@@ -87,7 +116,7 @@ class TriggerStore:
         conn = self._get_conn()
         try:
             conn.execute(
-                "INSERT INTO triggers (id, regex_pattern, response_type_id, response_text, arg_mappings, cooldown_minutes) VALUES (?, ?, ?, ?, ?, ?)",
+                "INSERT INTO triggers (id, regex_pattern, response_type_id, response_text, arg_mappings, cooldown_minutes, last_fired) VALUES (?, ?, ?, ?, ?, ?, ?)",
                 (
                     tid,
                     regex_pattern,
@@ -95,12 +124,24 @@ class TriggerStore:
                     response_text,
                     arg_json,
                     int(cooldown_minutes),
+                    0.0,
                 ),
             )
             conn.commit()
         finally:
             conn.close()
         return tid
+
+    def update_last_fired(self, trigger_id: str, ts: float) -> None:
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "UPDATE triggers SET last_fired = ? WHERE id = ?",
+                (float(ts), trigger_id),
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def remove_trigger(self, trigger_id: str) -> bool:
         conn = self._get_conn()
@@ -115,7 +156,7 @@ class TriggerStore:
         conn = self._get_conn()
         try:
             cur = conn.execute(
-                "SELECT id, regex_pattern, response_type_id, response_text, arg_mappings, cooldown_minutes FROM triggers"
+                "SELECT id, regex_pattern, response_type_id, response_text, arg_mappings, cooldown_minutes, last_fired FROM triggers"
             )
             rows = cur.fetchall()
             out: List[StoredTrigger] = []
@@ -134,6 +175,7 @@ class TriggerStore:
                         response_text=r["response_text"],
                         arg_mappings=arg_mappings,
                         cooldown_minutes=int(r["cooldown_minutes"] or 0),
+                        last_fired=float(r["last_fired"] or 0.0),
                     )
                 )
             return out

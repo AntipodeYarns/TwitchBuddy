@@ -20,6 +20,13 @@ jobs:
           python -m pip install --upgrade pip
           pip install ruff mypy black pytest
           pip install -e .
+      - name: Configure test DB path
+        run: |
+          # Use an isolated DB file inside the runner workspace for tests
+          export TWITCHBUDDY_DB_PATH="$GITHUB_WORKSPACE/twitchbuddy-ci-test.db"
+          export TWITCHBUDDY_DATA_DIR="$GITHUB_WORKSPACE/.local/share/twitchbuddy"
+          echo "TWITCHBUDDY_DB_PATH=$TWITCHBUDDY_DB_PATH" >> $GITHUB_ENV
+          echo "TWITCHBUDDY_DATA_DIR=$TWITCHBUDDY_DATA_DIR" >> $GITHUB_ENV
       - name: Lint (ruff)
         run: ruff check .
       - name: Type check (mypy)

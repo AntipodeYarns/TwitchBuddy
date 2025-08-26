@@ -7,6 +7,10 @@ from typing import List
 from typing import Dict, Any
 
 from .trigger_store import TriggerStore
+from .asset_store import AssetStore
+from .alert_store import AlertStore
+from .config import Config
+from .scheduler import Scheduler
 
 
 class BroadcastManager:
@@ -40,13 +44,58 @@ class BroadcastManager:
                     self.active.remove(ws)
 
 
-def create_app() -> FastAPI:
-    app = FastAPI()
+def create_app(db_path: str | None = None, config: Config | None = None) -> FastAPI:
+    """Create the FastAPI app for TwitchBuddy.
+
+    Priority for DB path: explicit db_path arg > Config.db_path > env override > default.
+    When running under pytest we create a temporary DB to isolate tests.
+    """
+
+    # normalize config
+    cfg = config or Config.from_env()
+
+    # pick an effective DB path: explicit arg > config > env/test temp > default
+    effective_db_path = db_path or (str(cfg.db_path) if cfg.db_path else None)
+    if not effective_db_path:
+        import os
+
+        # pytest sets PYTEST_CURRENT_TEST in the environment during runs;
+        # create a temp DB file for test isolation when present
+        if os.environ.get("PYTEST_CURRENT_TEST"):
+            import tempfile
+
+            tmp = tempfile.NamedTemporaryFile(
+                prefix="twitchbuddy-test-", suffix=".db", delete=False
+            )
+            effective_db_path = tmp.name
+
+    # instantiate stores (stores expect Path | None)
+    from pathlib import Path
+
+    db_path_obj = Path(effective_db_path) if effective_db_path is not None else None
+
+    trigger_store = TriggerStore(db_path=db_path_obj)
+    asset_store = AssetStore(db_path=db_path_obj)
+    alert_store = AlertStore(db_path=db_path_obj)
+
+    # broadcast manager must exist before the scheduler so we can pass a
+    # send_callable that schedules broadcasts to connected websockets.
     bm = BroadcastManager()
+
+    async def _send_from_scheduler(message: str) -> None:
+        # scheduler messages are simple strings; wrap into a dict for clients
+        await bm.broadcast({"type": "scheduled", "message": message})
+
+    scheduler = Scheduler(send_callable=_send_from_scheduler, db_path=db_path_obj)
+
+    app = FastAPI()
+    # keep scheduler on app.state so it can be controlled and to avoid linter
+    # complaints about an unused local variable.
+    app.state.scheduler = scheduler
     app.state.bm = bm
-    # trigger store for admin operations
-    store = TriggerStore()
-    app.state.trigger_store = store
+    app.state.trigger_store = trigger_store
+    app.state.asset_store = asset_store
+    app.state.alert_store = alert_store
     # serve static files from web/static
     app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
@@ -119,6 +168,128 @@ def create_app() -> FastAPI:
         ok = app.state.trigger_store.remove_trigger(trigger_id)
         if not ok:
             raise HTTPException(status_code=404, detail="trigger not found")
+        return {"status": "deleted"}
+
+    # --- admin asset management --------------------------------------------------
+    @app.get("/admin/assets")
+    async def list_assets(kind: str | None = None):
+        """List assets; optional query param `kind` (audio|visual)."""
+        if kind is not None and kind not in ("audio", "visual"):
+            raise HTTPException(
+                status_code=400, detail="kind must be 'audio' or 'visual'"
+            )
+        assets = app.state.asset_store.list_assets(kind=kind)
+        return [
+            {
+                "id": a.id,
+                "short_name": a.short_name,
+                "asset_kind": a.asset_kind,
+                "asset_class": a.asset_class,
+                "file_path": a.file_path,
+                "file_type": a.file_type,
+                "loopable": a.loopable,
+                "media_length": a.media_length,
+                "copyright_safe": a.copyright_safe,
+                "created_at": a.created_at,
+            }
+            for a in assets
+        ]
+
+    @app.post("/admin/assets")
+    async def create_asset(payload: Dict[str, Any]):
+        """Create an asset. Required: short_name, asset_kind, file_path. Optional: file_type, loopable (yes/no), media_length, copyright_safe (yes/no)."""
+        short_name = payload.get("short_name")
+        asset_kind = payload.get("asset_kind")
+        file_path = payload.get("file_path")
+        if not short_name or not asset_kind or not file_path:
+            raise HTTPException(
+                status_code=400,
+                detail="short_name, asset_kind and file_path are required",
+            )
+        try:
+            aid = app.state.asset_store.add_asset(
+                short_name=short_name,
+                asset_kind=asset_kind,
+                asset_class=payload.get("asset_class"),
+                file_path=file_path,
+                file_type=payload.get("file_type"),
+                loopable=payload.get("loopable", "no"),
+                media_length=payload.get("media_length"),
+                copyright_safe=payload.get("copyright_safe", "no"),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"id": aid}
+
+    @app.delete("/admin/assets/{identifier}")
+    async def delete_asset(identifier: str):
+        ok = app.state.asset_store.remove_asset(identifier)
+        if not ok:
+            raise HTTPException(status_code=404, detail="asset not found")
+        return {"status": "deleted"}
+
+    # --- admin alert management --------------------------------------------------
+    @app.get("/admin/alerts")
+    async def list_alerts():
+        alerts = app.state.alert_store.list_alerts()
+        out = []
+        for a in alerts:
+            out.append(
+                {
+                    "id": a.id,
+                    "alert_name": a.alert_name,
+                    "audio_asset_id": a.audio_asset_id,
+                    "visual_asset_id": a.visual_asset_id,
+                    "play_duration": a.play_duration,
+                    "fade_inout_time": a.fade_inout_time,
+                    "text_template": a.text_template,
+                    "arg_mapping": a.arg_mapping,
+                    "created_at": a.created_at,
+                }
+            )
+        return out
+
+    @app.post("/admin/alerts")
+    async def create_alert(payload: Dict[str, Any]):
+        required = payload.get("alert_name")
+        if not required:
+            raise HTTPException(status_code=400, detail="alert_name is required")
+        try:
+            aid = app.state.alert_store.add_alert(
+                alert_name=payload["alert_name"],
+                audio_asset_id=payload.get("audio_asset_id"),
+                visual_asset_id=payload.get("visual_asset_id"),
+                play_duration=payload.get("play_duration"),
+                fade_inout_time=payload.get("fade_inout_time"),
+                text_template=payload.get("text_template"),
+                arg_mapping=payload.get("arg_mapping"),
+            )
+        except ValueError as e:
+            raise HTTPException(status_code=400, detail=str(e))
+        return {"id": aid}
+
+    @app.get("/admin/alerts/{alert_id}")
+    async def get_alert(alert_id: str):
+        a = app.state.alert_store.get_alert(alert_id)
+        if not a:
+            raise HTTPException(status_code=404, detail="alert not found")
+        return {
+            "id": a.id,
+            "alert_name": a.alert_name,
+            "audio_asset_id": a.audio_asset_id,
+            "visual_asset_id": a.visual_asset_id,
+            "play_duration": a.play_duration,
+            "fade_inout_time": a.fade_inout_time,
+            "text_template": a.text_template,
+            "arg_mapping": a.arg_mapping,
+            "created_at": a.created_at,
+        }
+
+    @app.delete("/admin/alerts/{alert_id}")
+    async def delete_alert(alert_id: str):
+        ok = app.state.alert_store.remove_alert(alert_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="alert not found")
         return {"status": "deleted"}
 
     @app.post("/eventsub/webhook")
