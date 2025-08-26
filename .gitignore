@@ -7,3 +7,5 @@ build/
 cert.pem
 key.pem
 # Single consolidated DB file is kept in the repo as a template; do not ignore.
+#.env files may contain secrets for local admin auth
+.env
