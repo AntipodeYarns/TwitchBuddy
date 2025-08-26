@@ -1,9 +1,12 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect
+from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 import asyncio
 import json
 from typing import List
+from typing import Dict, Any
+
+from .trigger_store import TriggerStore
 
 
 class BroadcastManager:
@@ -41,6 +44,9 @@ def create_app() -> FastAPI:
     app = FastAPI()
     bm = BroadcastManager()
     app.state.bm = bm
+    # trigger store for admin operations
+    store = TriggerStore()
+    app.state.trigger_store = store
     # serve static files from web/static
     app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
@@ -63,6 +69,57 @@ def create_app() -> FastAPI:
         """HTTP demo hook to trigger an alert payload to connected clients."""
         await bm.broadcast(alert)
         return {"status": "ok"}
+
+    # --- admin trigger management -------------------------------------------------
+    @app.get("/admin/triggers")
+    async def list_triggers():
+        """Return all stored triggers."""
+        ts = app.state.trigger_store.list_triggers()
+        # serialize StoredTrigger dataclass to dict
+        out = []
+        for t in ts:
+            out.append(
+                {
+                    "id": t.id,
+                    "regex_pattern": t.regex_pattern,
+                    "response_type_id": t.response_type_id,
+                    "response_text": t.response_text,
+                    "arg_mappings": t.arg_mappings,
+                    "cooldown_minutes": t.cooldown_minutes,
+                }
+            )
+        return out
+
+    @app.post("/admin/triggers")
+    async def create_trigger(payload: Dict[str, Any]):
+        """Create a trigger.
+
+        Expected JSON:
+          {"regex_pattern": str, "response_type_id": int, "response_text": str|null, "arg_mappings": dict|null, "cooldown_minutes": int}
+        Returns: {"id": <trigger_id>}
+        """
+        regex = payload.get("regex_pattern")
+        rtid = payload.get("response_type_id")
+        if not regex or not rtid:
+            raise HTTPException(
+                status_code=400,
+                detail="regex_pattern and response_type_id are required",
+            )
+        tid = app.state.trigger_store.add_trigger(
+            regex_pattern=regex,
+            response_type_id=int(rtid),
+            response_text=payload.get("response_text"),
+            arg_mappings=payload.get("arg_mappings"),
+            cooldown_minutes=int(payload.get("cooldown_minutes") or 0),
+        )
+        return {"id": tid}
+
+    @app.delete("/admin/triggers/{trigger_id}")
+    async def delete_trigger(trigger_id: str):
+        ok = app.state.trigger_store.remove_trigger(trigger_id)
+        if not ok:
+            raise HTTPException(status_code=404, detail="trigger not found")
+        return {"status": "deleted"}
 
     @app.post("/eventsub/webhook")
     async def eventsub_webhook(request):

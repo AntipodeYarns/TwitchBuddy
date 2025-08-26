@@ -34,3 +34,14 @@ These statistics would then be able to be displayed in an alert box in response 
 Regarding Python UI - I would like to use the simplest possible UI/UX framework, and am open to recommendations. Electron would be an acceptable fallback if there is no easy to use Python windowed application framework available.
 
 If we need to configure a dynamic hosting site in order to emit alert HTML, FastAPI or a similar lightweight Python Web Server would be preferred, although Node.js would also be acceptable.
+
+Admin HTTP endpoints for trigger management
+------------------------------------------
+
+The alerts FastAPI application exposes a small set of admin endpoints to manage chat/alert triggers at runtime. These are:
+
+- GET /admin/triggers — list stored triggers (id, regex_pattern, response_type_id, response_text, arg_mappings, cooldown_minutes)
+- POST /admin/triggers — create a trigger. JSON body must include `regex_pattern` (string) and `response_type_id` (int). Optional fields: `response_text`, `arg_mappings` (object), `cooldown_minutes` (int).
+- DELETE /admin/triggers/{trigger_id} — remove a trigger by id.
+
+These endpoints are intentionally minimal and intended for operator use behind appropriate authentication in production.
