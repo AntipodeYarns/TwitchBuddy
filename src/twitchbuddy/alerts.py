@@ -11,6 +11,7 @@ from .asset_store import AssetStore
 from .alert_store import AlertStore
 from .config import Config
 from .scheduler import Scheduler
+from .ch_logging import get_logger
 
 
 class BroadcastManager:
@@ -117,6 +118,27 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
     async def trigger(alert: dict):
         """HTTP demo hook to trigger an alert payload to connected clients."""
         await bm.broadcast(alert)
+        # log to ClickHouse if available
+        try:
+            logger = get_logger()
+            # if payload contains user info and trigger name, log chat event
+            user = alert.get("user") if isinstance(alert, dict) else None
+            trigger_name = (
+                alert.get("trigger_name") if isinstance(alert, dict) else None
+            )
+            if user:
+                logger.log_chat(
+                    channel="",
+                    username=user,
+                    fired=bool(trigger_name),
+                    name=trigger_name,
+                )
+            if trigger_name:
+                logger.log_trigger_event(
+                    channel="", trigger_name=trigger_name, trigger_type="alert"
+                )
+        except Exception:
+            pass
         return {"status": "ok"}
 
     # --- admin trigger management -------------------------------------------------
