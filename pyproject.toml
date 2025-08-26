@@ -1,0 +1,29 @@
+[project]
+name = "twitchbuddy"
+version = "0.1.0"
+description = "TwitchBuddy — helper tools and utilities"
+requires-python = ">=3.12,<3.13"
+dependencies = []
+
+[build-system]
+requires = ["setuptools>=61.0"]
+build-backend = "setuptools.build_meta"
+
+[tool.pytest.ini_options]
+minversion = "7.0"
+addopts = "-ra"
+testpaths = ["tests"]
+
+[tool.ruff]
+line-length = 88
+exclude = [".venv", "build", "dist", "*.egg-info"]
+
+[tool.mypy]
+python_version = "3.12"
+ignore_missing_imports = true
+warn_return_any = false
+warn_unused_configs = true
+
+[tool.black]
+line-length = 88
+target-version = ["py312"]
