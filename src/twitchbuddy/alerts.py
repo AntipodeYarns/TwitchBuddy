@@ -1,4 +1,11 @@
-from fastapi import FastAPI, WebSocket, WebSocketDisconnect, HTTPException
+from fastapi import (
+    FastAPI,
+    WebSocket,
+    WebSocketDisconnect,
+    HTTPException,
+    Depends,
+    Header,
+)
 from fastapi.staticfiles import StaticFiles
 from fastapi.responses import HTMLResponse
 import asyncio
@@ -100,9 +107,78 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
     # serve static files from web/static
     app.mount("/static", StaticFiles(directory="web/static"), name="static")
 
+    import os
+
+    import base64
+
+    def _set_admin_env_from_payload(cfg: dict) -> None:
+        """Helper to set relevant ADMIN_* env vars from provided config dict.
+
+        We set in-process environment variables so checks take effect immediately.
+        Persisted JSON also contains the values so they survive restarts.
+        """
+        mode = cfg.get("admin_auth_mode") or os.environ.get("ADMIN_AUTH_MODE")
+        if mode is not None:
+            os.environ["ADMIN_AUTH_MODE"] = str(mode)
+        # API key
+        api_key = cfg.get("admin_api_key")
+        if api_key is not None:
+            os.environ["ADMIN_API_KEY"] = str(api_key)
+        # Basic creds
+        basic_user = cfg.get("admin_basic_user")
+        basic_pass = cfg.get("admin_basic_pass")
+        if basic_user is not None:
+            os.environ["ADMIN_BASIC_USER"] = str(basic_user)
+        if basic_pass is not None:
+            os.environ["ADMIN_BASIC_PASS"] = str(basic_pass)
+
+    async def require_admin(
+        x_admin_key: str | None = Header(default=None),
+        authorization: str | None = Header(default=None),
+    ):
+        """FastAPI dependency to guard admin API endpoints.
+
+        Behavior controlled by ADMIN_AUTH_MODE env var (none|api_key|basic).
+        - none (or unset): no auth performed.
+        - api_key: expects X-ADMIN-KEY header to match ADMIN_API_KEY env var.
+        - basic: expects HTTP Basic Authorization header matching ADMIN_BASIC_USER/ADMIN_BASIC_PASS.
+        """
+        mode = os.environ.get("ADMIN_AUTH_MODE", "none")
+        mode = (mode or "none").lower()
+        if mode in ("", "none"):
+            return
+        if mode == "api_key":
+            expected = os.environ.get("ADMIN_API_KEY")
+            if not expected:
+                # if no key set, treat as disabled
+                return
+            if x_admin_key != expected:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            return
+        if mode == "basic":
+            exp_user = os.environ.get("ADMIN_BASIC_USER")
+            exp_pass = os.environ.get("ADMIN_BASIC_PASS")
+            if not exp_user or not exp_pass:
+                return
+            if not authorization or not authorization.startswith("Basic "):
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            try:
+                b64 = authorization.split(None, 1)[1]
+                decoded = base64.b64decode(b64).decode("utf-8")
+                user, pwd = decoded.split(":", 1)
+            except Exception:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            if user != exp_user or pwd != exp_pass:
+                raise HTTPException(status_code=401, detail="Unauthorized")
+            return
+
     @app.get("/")
     async def index():
         return HTMLResponse(open("web/static/alert.html", "r", encoding="utf-8").read())
+
+    @app.get("/admin")
+    async def admin_index():
+        return HTMLResponse(open("web/static/admin.html", "r", encoding="utf-8").read())
 
     @app.websocket("/ws/alerts")
     async def ws_alerts(ws: WebSocket):
@@ -143,7 +219,7 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
 
     # --- admin trigger management -------------------------------------------------
     @app.get("/admin/triggers")
-    async def list_triggers():
+    async def list_triggers(dep=Depends(require_admin)):
         """Return all stored triggers."""
         ts = app.state.trigger_store.list_triggers()
         # serialize StoredTrigger dataclass to dict
@@ -162,7 +238,7 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
         return out
 
     @app.post("/admin/triggers")
-    async def create_trigger(payload: Dict[str, Any]):
+    async def create_trigger(payload: Dict[str, Any], dep=Depends(require_admin)):
         """Create a trigger.
 
         Expected JSON:
@@ -183,18 +259,34 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
             arg_mappings=payload.get("arg_mappings"),
             cooldown_minutes=int(payload.get("cooldown_minutes") or 0),
         )
+        # notify cache to refresh immediately while stream is running
+        try:
+            from .trigger_store import get_trigger_cache
+
+            cache = get_trigger_cache(db_path=db_path_obj)
+            cache.notify_change()
+        except Exception:
+            pass
         return {"id": tid}
 
     @app.delete("/admin/triggers/{trigger_id}")
-    async def delete_trigger(trigger_id: str):
+    async def delete_trigger(trigger_id: str, dep=Depends(require_admin)):
         ok = app.state.trigger_store.remove_trigger(trigger_id)
         if not ok:
             raise HTTPException(status_code=404, detail="trigger not found")
+        # notify cache to refresh immediately
+        try:
+            from .trigger_store import get_trigger_cache
+
+            cache = get_trigger_cache(db_path=db_path_obj)
+            cache.notify_change()
+        except Exception:
+            pass
         return {"status": "deleted"}
 
     # --- admin asset management --------------------------------------------------
     @app.get("/admin/assets")
-    async def list_assets(kind: str | None = None):
+    async def list_assets(kind: str | None = None, dep=Depends(require_admin)):
         """List assets; optional query param `kind` (audio|visual)."""
         if kind is not None and kind not in ("audio", "visual"):
             raise HTTPException(
@@ -218,7 +310,7 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
         ]
 
     @app.post("/admin/assets")
-    async def create_asset(payload: Dict[str, Any]):
+    async def create_asset(payload: Dict[str, Any], dep=Depends(require_admin)):
         """Create an asset. Required: short_name, asset_kind, file_path. Optional: file_type, loopable (yes/no), media_length, copyright_safe (yes/no)."""
         short_name = payload.get("short_name")
         asset_kind = payload.get("asset_kind")
@@ -244,15 +336,86 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
         return {"id": aid}
 
     @app.delete("/admin/assets/{identifier}")
-    async def delete_asset(identifier: str):
+    async def delete_asset(identifier: str, dep=Depends(require_admin)):
         ok = app.state.asset_store.remove_asset(identifier)
         if not ok:
             raise HTTPException(status_code=404, detail="asset not found")
         return {"status": "deleted"}
 
+    # --- admin config (Twitch credentials, channel details) -------------------
+    @app.get("/admin/config")
+    async def get_config(dep=Depends(require_admin)):
+        """Return stored config from a JSON file next to the DB or repo root.
+
+        Fields: client_id, client_secret (masked), channel, redirect_uri
+        """
+        import json
+
+        from pathlib import Path
+
+        # config file lives next to DB if db_path_obj provided, else repo CWD
+        cfg_path = (
+            (db_path_obj.parent / "twitch_config.json")
+            if db_path_obj is not None
+            else Path.cwd() / "twitch_config.json"
+        )
+        if not cfg_path.exists():
+            return {}
+        try:
+            with cfg_path.open("r", encoding="utf-8") as fh:
+                data = json.load(fh)
+            # mask secret for safe display
+            if "client_secret" in data and data["client_secret"]:
+                data["client_secret"] = "****"
+            # mask admin basic password
+            if "admin_basic_pass" in data and data["admin_basic_pass"]:
+                data["admin_basic_pass"] = "****"
+            # don't return the real API key if present (optional)
+            if "admin_api_key" in data and data["admin_api_key"]:
+                # only expose placeholder
+                data["admin_api_key"] = data["admin_api_key"][:4] + "****"
+            return data
+        except Exception:
+            return {}
+
+    @app.post("/admin/config")
+    async def set_config(payload: Dict[str, Any], dep=Depends(require_admin)):
+        """Persist provided config to JSON. Expected keys: client_id, client_secret, channel, redirect_uri."""
+        import json
+
+        from pathlib import Path
+
+        cfg = {
+            "client_id": payload.get("client_id"),
+            "client_secret": payload.get("client_secret"),
+            "channel": payload.get("channel"),
+            "redirect_uri": payload.get("redirect_uri"),
+            # admin auth settings
+            "admin_auth_mode": payload.get("admin_auth_mode"),
+            "admin_api_key": payload.get("admin_api_key"),
+            "admin_basic_user": payload.get("admin_basic_user"),
+            "admin_basic_pass": payload.get("admin_basic_pass"),
+        }
+        cfg_path = (
+            (db_path_obj.parent / "twitch_config.json")
+            if db_path_obj is not None
+            else Path.cwd() / "twitch_config.json"
+        )
+        try:
+            with cfg_path.open("w", encoding="utf-8") as fh:
+                json.dump(cfg, fh)
+            # set envs so the running process immediately adopts the new admin auth
+            try:
+                _set_admin_env_from_payload(cfg)
+            except Exception:
+                pass
+            return {"status": "ok"}
+        except Exception as e:
+            raise HTTPException(status_code=500, detail=str(e))
+
     # --- admin alert management --------------------------------------------------
     @app.get("/admin/alerts")
-    async def list_alerts():
+    async def list_alerts(dep=Depends(require_admin)):
         alerts = app.state.alert_store.list_alerts()
         out = []
         for a in alerts:
@@ -272,7 +435,7 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
         return out
 
     @app.post("/admin/alerts")
-    async def create_alert(payload: Dict[str, Any]):
+    async def create_alert(payload: Dict[str, Any], dep=Depends(require_admin)):
         required = payload.get("alert_name")
         if not required:
             raise HTTPException(status_code=400, detail="alert_name is required")
@@ -291,7 +454,7 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
         return {"id": aid}
 
     @app.get("/admin/alerts/{alert_id}")
-    async def get_alert(alert_id: str):
+    async def get_alert(alert_id: str, dep=Depends(require_admin)):
         a = app.state.alert_store.get_alert(alert_id)
         if not a:
             raise HTTPException(status_code=404, detail="alert not found")
@@ -308,7 +471,7 @@ def create_app(db_path: str | None = None, config: Config | None = None) -> Fast
         }
 
     @app.delete("/admin/alerts/{alert_id}")
-    async def delete_alert(alert_id: str):
+    async def delete_alert(alert_id: str, dep=Depends(require_admin)):
         ok = app.state.alert_store.remove_alert(alert_id)
         if not ok:
             raise HTTPException(status_code=404, detail="alert not found")

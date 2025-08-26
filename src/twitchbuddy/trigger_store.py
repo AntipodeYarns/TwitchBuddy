@@ -7,6 +7,9 @@ from dataclasses import dataclass
 from pathlib import Path
 from .paths import default_db_path
 from typing import Dict, Any, List, Optional
+import threading
+from typing import Callable
+import time
 
 
 @dataclass
@@ -181,3 +184,123 @@ class TriggerStore:
             return out
         finally:
             conn.close()
+
+
+# Simple in-process cache to avoid hitting the DB on every chat message.
+# Provides listener registration so consumers (e.g. ChatClient) can be
+# notified when triggers refresh.
+class TriggerCache:
+    def __init__(self, store: TriggerStore):
+        self._store = store
+        self._lock = threading.Lock()
+        self._cached: List[StoredTrigger] = []
+        self._listeners: List[Callable[[List[StoredTrigger]], None]] = []
+        self._stop = threading.Event()
+        self._thread: Optional[threading.Thread] = None
+
+    def refresh(self) -> None:
+        with self._lock:
+            self._cached = self._store.list_triggers()
+            snapshot = list(self._cached)
+        # notify listeners outside lock
+        for listener in list(self._listeners):
+            try:
+                listener(snapshot)
+            except Exception:
+                # listener errors shouldn't break cache
+                continue
+
+    def list_cached_triggers(self) -> List[StoredTrigger]:
+        with self._lock:
+            return list(self._cached)
+
+    def register_listener(
+        self, listener: Callable[[List[StoredTrigger]], None]
+    ) -> None:
+        with self._lock:
+            self._listeners.append(listener)
+
+    def unregister_listener(
+        self, listener: Callable[[List[StoredTrigger]], None]
+    ) -> None:
+        with self._lock:
+            try:
+                self._listeners.remove(listener)
+            except ValueError:
+                pass
+
+    def notify_change(self) -> None:
+        """Called when DB writes occur (add/update/delete). Refresh immediately."""
+        try:
+            self.refresh()
+        except Exception:
+            pass
+
+    def start_auto_refresh(
+        self,
+        stream_check: Optional[Callable[[], bool]] = None,
+        refresh_interval: int = 1800,
+    ) -> None:
+        """Start a background thread that refreshes cache every `refresh_interval` seconds
+        while `stream_check()` returns True. If `stream_check` is None, always refresh on interval.
+        When starting, refresh immediately if stream_check reports True (or no stream_check supplied).
+        """
+
+        def _run():
+            # immediate refresh if appropriate
+            try:
+                if stream_check is None or stream_check():
+                    self.refresh()
+            except Exception:
+                # ignore stream_check errors
+                self.refresh()
+
+            while not self._stop.is_set():
+                try:
+                    # only refresh if stream is online (or no check provided)
+                    if stream_check is None or stream_check():
+                        self.refresh()
+                except Exception:
+                    # swallow errors and continue
+                    pass
+                # sleep in small increments so thread can be stopped quickly
+                total = 0
+                while total < refresh_interval and not self._stop.is_set():
+                    time.sleep(1)
+                    total += 1
+
+        if self._thread is not None and self._thread.is_alive():
+            return
+        self._stop.clear()
+        self._thread = threading.Thread(target=_run, daemon=True)
+        self._thread.start()
+
+    def stop_auto_refresh(self) -> None:
+        if self._thread is None:
+            return
+        self._stop.set()
+        try:
+            self._thread.join(timeout=1.0)
+        except Exception:
+            pass
+
+
+# Module-level cache registry keyed by db_path string
+_CACHES: Dict[str, TriggerCache] = {}
+
+
+def get_trigger_cache(db_path: Optional[Path] = None) -> TriggerCache:
+    key = (
+        str(db_path) if db_path is not None else str(default_db_path("TwitchBuddy.db"))
+    )
+    if key in _CACHES:
+        return _CACHES[key]
+    store = TriggerStore(db_path=Path(db_path) if db_path is not None else None)
+    cache = TriggerCache(store)
+    # perform an initial refresh
+    try:
+        cache.refresh()
+    except Exception:
+        pass
+    _CACHES[key] = cache
+    return cache

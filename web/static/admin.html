@@ -1,0 +1,164 @@
+<!doctype html>
+<html lang="en">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>TwitchBuddy Admin</title>
+    <style>
+      body { font-family: system-ui, sans-serif; margin: 16px; }
+      header { display:flex; align-items:center; gap:12px; }
+      nav { margin-top: 12px; }
+      .tab { display:none; }
+      .tab.active { display:block; }
+      .tabs button { margin-right:6px; }
+      .row { display:flex; gap:12px; align-items:center; }
+      pre { background:#f6f8fa; padding:8px; }
+      table { border-collapse:collapse; width:100%; }
+      th, td { border:1px solid #ddd; padding:8px; }
+    </style>
+  </head>
+  <body>
+    <header>
+      <h1>TwitchBuddy Admin</h1>
+      <div style="margin-left:auto"><a href="/">Open Alert Viewer</a></div>
+    </header>
+
+    <nav class="tabs">
+      <button data-target="triggers">Triggers</button>
+      <button data-target="alerts">Alerts</button>
+      <button data-target="assets">Assets</button>
+      <button data-target="twitch">Twitch Config</button>
+      <button data-target="test">Test / Utilities</button>
+    </nav>
+
+    <section id="triggers" class="tab">
+      <h2>Triggers</h2>
+      <div>
+        <h3>Create Trigger</h3>
+        <div class="row">
+    <div id="assets" class="tabcontent">
+      <h3>Assets</h3>
+      <div>
+        <input id="as_name" placeholder="short name" />
+        <select id="as_kind"><option value="audio">audio</option><option value="visual">visual</option></select>
+        <input id="as_path" placeholder="file path or URL" />
+        <button id="as_create">Create Asset</button>
+      </div>
+      <div id="as_list"></div>
+    </div>
+
+    <div id="alerts" class="tabcontent">
+      <h3>Alerts</h3>
+      <div>
+        <input id="a_name" placeholder="alert name" />
+        <input id="a_audio" placeholder="audio asset id (short name)" />
+        <input id="a_visual" placeholder="visual asset id (short name)" />
+        <button id="a_create">Create Alert</button>
+      </div>
+      <div id="a_list"></div>
+    </div>
+
+    <div id="twitch" class="tabcontent">
+      <h3>Twitch Config</h3>
+      <div>
+        <input id="tc_client" placeholder="client id" />
+        <input id="tc_secret" placeholder="client secret" />
+        <input id="tc_channel" placeholder="channel" />
+        <input id="tc_redirect" placeholder="redirect uri" />
+        <button id="tc_save">Save</button>
+      </div>
+    </div>
+          <input id="t_regex" placeholder="regex pattern" style="flex:1" />
+          <input id="t_response" placeholder="response text (optional)" style="flex:1" />
+          <button id="t_create">Create</button>
+        </div>
+      </div>
+      <div>
+        <h3>Existing</h3>
+        <div id="triggers_list">Loading…</div>
+      </div>
+    </section>
+
+    <section id="alerts" class="tab">
+      <h2>Alerts</h2>
+      <div>
+        <h3>Create Alert</h3>
+        <div class="row">
+          <input id="a_name" placeholder="alert name" />
+          <input id="a_audio" placeholder="audio asset id (optional)" />
+          <input id="a_visual" placeholder="visual asset id (optional)" />
+          <button id="a_create">Create</button>
+        </div>
+      </div>
+      <div id="alerts_list">Loading…</div>
+    </section>
+
+    <section id="assets" class="tab">
+      <h2>Assets</h2>
+      <div>
+        <h3>Create Asset</h3>
+        <div class="row">
+          <input id="as_name" placeholder="short name" />
+          <select id="as_kind"><option value="audio">audio</option><option value="visual">visual</option></select>
+          <input id="as_path" placeholder="file path" style="flex:1" />
+          <button id="as_create">Create</button>
+        </div>
+      </div>
+      <div id="assets_list">Loading…</div>
+    </section>
+
+    <section id="twitch" class="tab">
+      <h2>Twitch Configuration</h2>
+      <div class="row">
+        <input id="tc_client" placeholder="client id" />
+        <input id="tc_secret" placeholder="client secret" />
+        <input id="tc_channel" placeholder="channel" />
+        <input id="tc_redirect" placeholder="redirect uri" />
+        <button id="tc_save">Save</button>
+      </div>
+      <p>After saving client credentials you can generate an OAuth link using the provider and exchange the code for tokens via external flow; this UI stores the client secrets for later automated flows.</p>
+    </section>
+
+    <section id="adminauth" class="tab">
+      <h2>Admin Authentication</h2>
+      <div class="row">
+        <label for="aa_mode">Mode</label>
+        <select id="aa_mode">
+          <option value="none">None (local only)</option>
+          <option value="api_key">API Key (X-ADMIN-KEY)</option>
+          <option value="basic">HTTP Basic</option>
+        </select>
+      </div>
+      <div id="aa_api" class="row" style="margin-top:8px;">
+        <input id="aa_api_key" placeholder="admin api key" />
+      </div>
+      <div id="aa_basic" class="row" style="margin-top:8px; display:none;">
+        <input id="aa_basic_user" placeholder="username" />
+        <input id="aa_basic_pass" placeholder="password" type="password" />
+      </div>
+      <div style="margin-top:8px;">
+        <button id="aa_save">Save Admin Auth</button>
+      </div>
+    </section>
+
+    <section id="test" class="tab">
+      <h2>Test / Utilities</h2>
+      <div>
+        <h3>Regex Tester</h3>
+        <input id="rt_pattern" placeholder="pattern" style="width:40%" />
+        <input id="rt_text" placeholder="test text" style="width:40%" />
+        <button id="rt_run">Run</button>
+        <pre id="rt_out"></pre>
+      </div>
+      <div>
+        <h3>Trigger Test</h3>
+        <input id="tt_user" placeholder="username" />
+        <input id="tt_msg" placeholder="message text" style="width:50%" />
+        <button id="tt_send">Send /trigger</button>
+        <pre id="tt_out"></pre>
+      </div>
+    </section>
+
+    <script src="/static/admin.js"></script>
+  </body>
+</html>

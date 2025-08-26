@@ -2,8 +2,9 @@ from typing import Callable, Optional, Pattern, Dict, Any
 import re
 import time
 import asyncio
+import threading
 
-from .trigger_store import TriggerStore
+from .trigger_store import TriggerStore, get_trigger_cache
 
 
 class Trigger:
@@ -51,6 +52,8 @@ class ChatClient:
         self.token = token
         self.channel = channel
         self.triggers: list[Trigger] = []
+        # lock to ensure cache refresh (swap) blocks matching/processing
+        self._triggers_lock = threading.Lock()
         self.on_alert: Optional[Callable[[Dict[str, Any]], None]] = None
         # scheduler is lazy-imported to avoid heavy deps at import time
         from .scheduler import Scheduler
@@ -58,36 +61,49 @@ class ChatClient:
         # create scheduler which will call self._send_message_async
         self.scheduler = Scheduler(send_callable=self._send_message_async)
 
-        # persistent trigger storage
+        # persistent trigger storage and cache
         self.trigger_store = TriggerStore()
-        # load persisted triggers
-        for st in self.trigger_store.list_triggers():
-            # map stored trigger to in-memory Trigger
-            if st.response_type_id == 1:
-                # chat_message
-                self.triggers.append(
-                    Trigger(
-                        st.regex_pattern,
-                        response=st.response_text,
-                        alert=None,
-                        cooldown_minutes=st.cooldown_minutes,
-                        trigger_id=st.id,
-                        last_fired=getattr(st, "last_fired", 0.0),
+        # use module-level cache so multiple components share same view
+        self._trigger_cache = get_trigger_cache()
+
+        def _on_cache_refresh(trigger_list):
+            # Convert StoredTrigger list into compiled Trigger objects
+            new: list[Trigger] = []
+            for st in trigger_list:
+                if st.response_type_id == 1:
+                    new.append(
+                        Trigger(
+                            st.regex_pattern,
+                            response=st.response_text,
+                            alert=None,
+                            cooldown_minutes=st.cooldown_minutes,
+                            trigger_id=st.id,
+                            last_fired=getattr(st, "last_fired", 0.0),
+                        )
                     )
-                )
-            elif st.response_type_id == 2:
-                # alert: store arg_mappings into alert payload for downstream consumers
-                alert_payload = {"args": st.arg_mappings} if st.arg_mappings else {}
-                self.triggers.append(
-                    Trigger(
-                        st.regex_pattern,
-                        response=None,
-                        alert=alert_payload,
-                        cooldown_minutes=st.cooldown_minutes,
-                        trigger_id=st.id,
-                        last_fired=getattr(st, "last_fired", 0.0),
+                elif st.response_type_id == 2:
+                    alert_payload = {"args": st.arg_mappings} if st.arg_mappings else {}
+                    new.append(
+                        Trigger(
+                            st.regex_pattern,
+                            response=None,
+                            alert=alert_payload,
+                            cooldown_minutes=st.cooldown_minutes,
+                            trigger_id=st.id,
+                            last_fired=getattr(st, "last_fired", 0.0),
+                        )
                     )
-                )
+            # swap in new triggers while holding the lock so matching is blocked
+            with self._triggers_lock:
+                self.triggers = new
+
+        # register listener and start periodic refresh while stream is online
+        self._trigger_cache.register_listener(_on_cache_refresh)
+        # ensure initial population
+        try:
+            _on_cache_refresh(self._trigger_cache.list_cached_triggers())
+        except Exception:
+            pass
 
     def add_trigger(
         self,
@@ -163,13 +179,15 @@ class ChatClient:
         # configured triggers. Matching is done against precompiled patterns.
         def _find_matching_triggers(content: str):
             out: list[Trigger] = []
-            for trig in self.triggers:
-                try:
-                    if trig.matches(content) and trig.can_fire():
-                        out.append(trig)
-                except Exception:
-                    # ignore matching errors per-trigger
-                    continue
+            # hold the lock while iterating triggers so refresh can't swap them
+            with self._triggers_lock:
+                for trig in self.triggers:
+                    try:
+                        if trig.matches(content) and trig.can_fire():
+                            out.append(trig)
+                    except Exception:
+                        # ignore matching errors per-trigger
+                        continue
             return out
 
         matches = await asyncio.to_thread(_find_matching_triggers, content)
