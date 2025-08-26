@@ -6,3 +6,4 @@ build/
 *.egg-info/
 cert.pem
 key.pem
+triggers.db
