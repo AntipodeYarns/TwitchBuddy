@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import asyncio
-import json
+import sqlite3
 import uuid
 from dataclasses import dataclass, asdict
 from pathlib import Path
@@ -17,59 +17,103 @@ class Schedule:
 
 
 class Scheduler:
-    """Simple interval-based scheduler with JSON persistence.
+    """Simple interval-based scheduler with SQLite persistence.
 
-    Schedules are stored as a list of dicts at the provided path. Each schedule is
-    an interval in seconds and a message to send. The scheduler calls the
-    provided send_callable(message) asynchronously on each firing.
+    Schedules are stored in a local SQLite database at `db_path` (default
+    'schedules.db'). The scheduler will call the provided async `send_callable`
+    with the message string on each interval. Database operations are simple
+    and lightweight; we create a connection per operation.
     """
 
     def __init__(
         self,
         send_callable: Callable[[str], Awaitable[None]],
-        persist_path: Optional[Path] = None,
+        db_path: Optional[Path] = None,
     ) -> None:
         self._send = send_callable
-        self._persist_path = persist_path or Path.cwd() / "schedules.json"
+        self._db_path = db_path or Path.cwd() / "schedules.db"
         self._schedules: Dict[str, Schedule] = {}
         self._tasks: Dict[str, asyncio.Task] = {}
+        self._ensure_db()
+
+    def _get_conn(self) -> sqlite3.Connection:
+        # create a short-lived connection per operation
+        conn = sqlite3.connect(str(self._db_path))
+        conn.row_factory = sqlite3.Row
+        return conn
+
+    def _ensure_db(self) -> None:
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS schedules (
+                    id TEXT PRIMARY KEY,
+                    message TEXT NOT NULL,
+                    interval_seconds INTEGER NOT NULL,
+                    enabled INTEGER NOT NULL
+                )
+                """
+            )
+            conn.commit()
+        finally:
+            conn.close()
 
     def load(self) -> None:
-        if not self._persist_path.exists():
-            return
+        conn = self._get_conn()
         try:
-            raw = json.loads(self._persist_path.read_text(encoding="utf-8"))
-            for item in raw:
-                s = Schedule(**item)
+            cur = conn.execute(
+                "SELECT id, message, interval_seconds, enabled FROM schedules"
+            )
+            rows = cur.fetchall()
+            self._schedules = {}
+            for r in rows:
+                s = Schedule(
+                    id=r["id"],
+                    message=r["message"],
+                    interval_seconds=int(r["interval_seconds"]),
+                    enabled=bool(r["enabled"]),
+                )
                 self._schedules[s.id] = s
-        except Exception:
-            # ignore malformed persist file
-            return
-
-    def save(self) -> None:
-        arr = [asdict(s) for s in self._schedules.values()]
-        self._persist_path.write_text(json.dumps(arr, indent=2), encoding="utf-8")
+        finally:
+            conn.close()
 
     def list(self) -> Dict[str, Dict[str, Any]]:
+        # reflect current DB state
+        self.load()
         return {sid: asdict(s) for sid, s in self._schedules.items()}
 
     def add(self, message: str, interval_seconds: int, enabled: bool = True) -> str:
         sid = str(uuid.uuid4())
+        conn = self._get_conn()
+        try:
+            conn.execute(
+                "INSERT INTO schedules (id, message, interval_seconds, enabled) VALUES (?, ?, ?, ?)",
+                (sid, message, int(interval_seconds), int(bool(enabled))),
+            )
+            conn.commit()
+        finally:
+            conn.close()
+        # update in-memory and return id
         s = Schedule(
             id=sid, message=message, interval_seconds=interval_seconds, enabled=enabled
         )
         self._schedules[sid] = s
-        self.save()
         return sid
 
     def remove(self, schedule_id: str) -> bool:
-        if schedule_id in self._schedules:
-            self._schedules.pop(schedule_id)
-            # cancel task if running
+        conn = self._get_conn()
+        try:
+            cur = conn.execute("DELETE FROM schedules WHERE id = ?", (schedule_id,))
+            conn.commit()
+            deleted = cur.rowcount > 0
+        finally:
+            conn.close()
+        if deleted:
             t = self._tasks.pop(schedule_id, None)
             if t:
                 t.cancel()
-            self.save()
+            self._schedules.pop(schedule_id, None)
             return True
         return False
 
@@ -82,6 +126,25 @@ class Scheduler:
                 except Exception:
                     # swallow send errors so scheduler keeps running
                     pass
+                # refresh enabled flag from DB in case it was toggled externally
+                try:
+                    conn = self._get_conn()
+                    cur = conn.execute(
+                        "SELECT enabled FROM schedules WHERE id = ?", (s.id,)
+                    )
+                    row = cur.fetchone()
+                    if row is None:
+                        # schedule removed
+                        s.enabled = False
+                    else:
+                        s.enabled = bool(row["enabled"])  # type: ignore[index]
+                except Exception:
+                    pass
+                finally:
+                    try:
+                        conn.close()
+                    except Exception:
+                        pass
         except asyncio.CancelledError:
             return
 
